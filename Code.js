@@ -1,19 +1,21 @@
 function exportScheduleToCalendar() {
-    var sheet =
+    const TZ = "America/Toronto"; // Eastern Time with DST
+
+    const sheet =
         SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Schedule");
-    if (!sheet) {
-        throw new Error("Sheet named 'Schedule' not found.");
-    }
-    var data = sheet.getDataRange().getValues();
+    if (!sheet) throw new Error("Sheet named 'Schedule' not found.");
+
+    const data = sheet.getDataRange().getValues();
     if (data.length < 2) return;
 
-    var calendarName = "Class Schedule";
-    var calendars = CalendarApp.getCalendarsByName(calendarName);
-    var calendar = calendars.length
-        ? calendars[0]
-        : CalendarApp.createCalendar(calendarName);
+    const calendarName = "Class Schedule 12312312";
+    const calendar =
+        CalendarApp.getCalendarsByName(calendarName)[0] ??
+        CalendarApp.createCalendar(calendarName);
 
-    var dayMap = {
+    calendar.setTimeZone(TZ);
+
+    const dayMap = {
         M: CalendarApp.Weekday.MONDAY,
         T: CalendarApp.Weekday.TUESDAY,
         W: CalendarApp.Weekday.WEDNESDAY,
@@ -21,100 +23,84 @@ function exportScheduleToCalendar() {
         F: CalendarApp.Weekday.FRIDAY,
     };
 
-    function parseTime(timeStr) {
-        var date = new Date("1970-01-01T" + timeStr.replace(/(AM|PM)/, " $1"));
-        if (isNaN(date.getTime())) {
-            var parts = timeStr.match(/(\d+):(\d+)(AM|PM)/);
-            if (parts) {
-                var h = parseInt(parts[1], 10);
-                var m = parseInt(parts[2], 10);
-                if (parts[3] === "PM" && h !== 12) h += 12;
-                if (parts[3] === "AM" && h === 12) h = 0;
-                date = new Date(1970, 0, 1, h, m);
-            }
-        }
-        return date;
+    function parseTimeToDate(baseDate, timeStr) {
+        const m = /(\d+):(\d+)(AM|PM)/.exec(timeStr);
+        if (!m) return new Date(baseDate);
+        let h = +m[1],
+            min = +m[2];
+        if (m[3] === "PM" && h !== 12) h += 12;
+        if (m[3] === "AM" && h === 12) h = 0;
+        const d = new Date(baseDate);
+        d.setHours(h, min, 0, 0);
+        return d;
     }
 
-    var headers = data[0];
-    var col = {};
-    headers.forEach(function (h, i) {
-        col[h] = i;
-    });
+    const headers = data[0];
+    const col = {};
+    headers.forEach((h, i) => (col[h] = i));
 
-    for (var i = 1; i < data.length; i++) {
-        var row = data[i];
-        var courseCode = row[col["COURSE CODE"]];
-        var component = row[col["COMPONENT"]];
-        var section = row[col["SECTION"]];
-        var classNum = row[col["CLASS NUMBER"]];
-        var repeatedDays = row[col["REPEATED DAYS"]];
-        var startTimeStr = row[col["START TIME"]];
-        var endTimeStr = row[col["END TIME"]];
-        var room = row[col["ROOM"]];
-        var instructor = row[col["INSTRUCTOR"]];
-        var startDateStr = row[col["START DATE"]];
-        var endDateStr = row[col["END DATE"]];
+    for (let r = 1; r < data.length; r++) {
+        const row = data[r];
+        const courseCode = row[col["COURSE CODE"]];
+        const component = row[col["COMPONENT"]];
+        const section = row[col["SECTION"]];
+        const classNum = row[col["CLASS NUMBER"]];
+        const repeatedDays = row[col["REPEATED DAYS"]];
+        const startTimeStr = row[col["START TIME"]];
+        const endTimeStr = row[col["END TIME"]];
+        const room = row[col["ROOM"]];
+        const instructor = row[col["INSTRUCTOR"]];
+        const startDate = new Date(row[col["START DATE"]]);
+        const endDate = new Date(row[col["END DATE"]]);
 
-        var title = courseCode + " - " + component;
-        var location = room;
-        var description =
-            "Instructor: " +
-            instructor +
-            "\n\nSection: " +
-            section +
-            "\nClass #: " +
-            classNum;
+        const title = `${courseCode} - ${component}`;
+        const description = `Instructor: ${instructor}\n\nSection: ${section}\nClass #: ${classNum}`;
 
-        var startDate = new Date(startDateStr);
-        var endDate = new Date(endDateStr);
-        var startTime = parseTime(startTimeStr);
-        var endTime = parseTime(endTimeStr);
+        const days =
+            typeof repeatedDays === "string"
+                ? (repeatedDays.match(/Th|M|T|W|F/g) || []).filter(
+                      (d) => dayMap[d]
+                  )
+                : [];
 
-        // Parse days like MWF, TTh, etc.
-        var days = [];
-        if (typeof repeatedDays === "string") {
-            var dayMatches = repeatedDays.match(/Th|M|T|W|F/g);
-            if (dayMatches) {
-                days = dayMatches.filter(function (d) {
-                    return dayMap[d];
-                });
-            }
+        if (startDate.getTime() === endDate.getTime() || days.length === 0) {
+            calendar.createEvent(
+                title,
+                parseTimeToDate(startDate, startTimeStr),
+                parseTimeToDate(startDate, endTimeStr),
+                { location: room, description, timeZone: TZ }
+            );
+            Utilities.sleep(10); // keep under quota
+            continue;
         }
 
-        for (
-            var d = new Date(startDate);
-            d <= endDate;
-            d.setDate(d.getDate() + 1)
+        const weekdayEnums = days.map((d) => dayMap[d]);
+
+        const recurrence = CalendarApp.newRecurrence()
+            .addWeeklyRule()
+            .onlyOnWeekdays(weekdayEnums)
+            // make the rule inclusive of the last meeting
+            .until(parseTimeToDate(endDate, endTimeStr))
+            .setTimeZone(TZ);
+
+        // first date that matches one of the repeat days
+        const jsWeekNums = { M: 1, T: 2, W: 3, Th: 4, F: 5 };
+        const validNums = days.map((d) => jsWeekNums[d]);
+        const firstDate = new Date(startDate);
+        while (
+            !validNums.includes(firstDate.getDay()) &&
+            firstDate <= endDate
         ) {
-            var weekday = d.getDay();
-            var dayLetter = null;
-            if (weekday === 1 && days.indexOf("M") !== -1) dayLetter = "M";
-            if (weekday === 2 && days.indexOf("T") !== -1) dayLetter = "T";
-            if (weekday === 3 && days.indexOf("W") !== -1) dayLetter = "W";
-            if (weekday === 4 && days.indexOf("Th") !== -1) dayLetter = "Th";
-            if (weekday === 5 && days.indexOf("F") !== -1) dayLetter = "F";
-            if (dayLetter) {
-                var eventStart = new Date(
-                    d.getFullYear(),
-                    d.getMonth(),
-                    d.getDate(),
-                    startTime.getHours(),
-                    startTime.getMinutes()
-                );
-                var eventEnd = new Date(
-                    d.getFullYear(),
-                    d.getMonth(),
-                    d.getDate(),
-                    endTime.getHours(),
-                    endTime.getMinutes()
-                );
-                calendar.createEvent(title, eventStart, eventEnd, {
-                    location: location,
-                    description: description,
-                });
-                Utilities.sleep(500);
-            }
+            firstDate.setDate(firstDate.getDate() + 1);
         }
+
+        calendar.createEventSeries(
+            title,
+            parseTimeToDate(firstDate, startTimeStr),
+            parseTimeToDate(firstDate, endTimeStr),
+            recurrence,
+            { location: room, description }
+        );
+        Utilities.sleep(10);
     }
 }
